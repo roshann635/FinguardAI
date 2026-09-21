@@ -167,7 +167,7 @@ export default function RiskIntelligence() {
                   </tr>
                 </thead>
                 <tbody>
-                  {riskScore.indicators.map((ind, i) => (
+                  {(riskScore.indicators ?? []).map((ind, i) => (
                     <tr key={i} className="border-t border-slate-100">
                       <td className="px-3 py-2 text-slate-700">{ind.name}</td>
                       <td className="px-3 py-2"><RiskBadge level={ind.level} /></td>
@@ -183,10 +183,10 @@ export default function RiskIntelligence() {
       ) : null}
 
       {/* Risk Indicators Detail */}
-      {riskScore && (
+      {riskScore && (riskScore.indicators?.length ?? 0) > 0 && (
         <SectionCard title="Risk Indicators Detail">
           <div className="space-y-3">
-            {riskScore.indicators.map((ind, i) => (
+            {(riskScore.indicators ?? []).map((ind, i) => (
               <div key={i} className="border border-slate-100 rounded-lg p-4">
                 <div className="flex items-center gap-3 mb-2">
                   <RiskBadge level={ind.level} />

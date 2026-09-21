@@ -2,7 +2,8 @@
  * Format a number as Indian Rupees.
  * abbreviated=true → ₹84.6M / ₹1.2B / ₹450K
  */
-export function formatINR(value: number, abbreviated = false): string {
+export function formatINR(value: number | null | undefined, abbreviated = false): string {
+  if (value === null || value === undefined || isNaN(value)) return '₹0'
   if (abbreviated) {
     const abs = Math.abs(value)
     const sign = value < 0 ? '-' : ''
@@ -19,7 +20,8 @@ export function formatINR(value: number, abbreviated = false): string {
   }).format(value)
 }
 
-export function formatUSD(value: number, abbreviated = false): string {
+export function formatUSD(value: number | null | undefined, abbreviated = false): string {
+  if (value === null || value === undefined || isNaN(value)) return '$0'
   if (abbreviated) {
     const abs = Math.abs(value)
     const sign = value < 0 ? '-' : ''
@@ -36,7 +38,9 @@ export function formatUSD(value: number, abbreviated = false): string {
   }).format(value)
 }
 
-export function formatPct(value: number, decimals = 1): string {
+export function formatPct(value: number | null | undefined, decimals = 1): string {
+  if (value === null || value === undefined || isNaN(value)) return '0.0%'
   return `${value.toFixed(decimals)}%`
 }
+
 
