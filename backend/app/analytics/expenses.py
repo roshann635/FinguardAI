@@ -40,12 +40,18 @@ class ExpenseAnalyticsService:
     # Expense trend
     # ------------------------------------------------------------------
 
+    def _is_sqlite(self) -> bool:
+        try:
+            return self.db.bind.dialect.name == "sqlite"
+        except Exception:
+            return False
+
     def get_expense_trend(
         self,
         start_date: Optional[date] = None,
         end_date: Optional[date] = None,
     ) -> List[TimeSeriesPoint]:
-        """Monthly total approved expenses time series."""
+        """Monthly approved expenses time series."""
         try:
             params: dict = {}
             date_clauses = ""
@@ -56,11 +62,16 @@ class ExpenseAnalyticsService:
                 date_clauses += " AND expense_date <= :end_date"
                 params["end_date"] = end_date
 
+            if self._is_sqlite():
+                period_sql = "strftime('%Y-%m-01', expense_date)"
+            else:
+                period_sql = "DATE_TRUNC('month', expense_date)::date"
+
             stmt = text(
                 f"""
                 SELECT
-                    DATE_TRUNC('month', expense_date)::date AS period,
-                    SUM(amount)                             AS total
+                    {period_sql} AS period,
+                    SUM(amount)  AS total
                 FROM expenses
                 WHERE status = 'approved'
                   {date_clauses}
@@ -69,14 +80,29 @@ class ExpenseAnalyticsService:
                 """
             )
             rows = self.db.execute(stmt, params).fetchall()
-            return [
-                TimeSeriesPoint(
-                    date=row.period.isoformat(),
-                    value=float(row.total or 0),
-                    label=row.period.strftime("%b %Y"),
+            results = []
+            for row in rows:
+                p = row.period
+                if isinstance(p, str):
+                    try:
+                        p_dt = date.fromisoformat(p[:10])
+                        p_iso = p_dt.isoformat()
+                        p_label = p_dt.strftime("%b %Y")
+                    except Exception:
+                        p_iso = p
+                        p_label = p
+                else:
+                    p_iso = p.isoformat()
+                    p_label = p.strftime("%b %Y")
+
+                results.append(
+                    TimeSeriesPoint(
+                        date=p_iso,
+                        value=float(row.total or 0),
+                        label=p_label,
+                    )
                 )
-                for row in rows
-            ]
+            return results
         except Exception:
             logger.exception("get_expense_trend failed")
             return []
@@ -104,15 +130,20 @@ class ExpenseAnalyticsService:
                 .order_by(func.sum(Expense.amount).desc())
                 .all()
             )
-            grand_total = sum(float(r.total or 0) for r in rows)
-            return [
-                CategoryBreakdown(
-                    category=row.name,
-                    value=float(row.total or 0),
-                    pct_of_total=round(safe_divide(float(row.total or 0), grand_total) * 100, 2),
+
+            total = sum(float(r.total or 0) for r in rows)
+            results: List[CategoryBreakdown] = []
+            for row in rows:
+                val = float(row.total or 0)
+                results.append(
+                    CategoryBreakdown(
+                        category=row.name,
+                        value=val,
+                        pct_of_total=round(safe_divide(val, total) * 100, 2),
+                        change_pct=None,
+                    )
                 )
-                for row in rows
-            ]
+            return results
         except Exception:
             logger.exception("get_expense_by_category failed")
             return []
@@ -141,6 +172,7 @@ class ExpenseAnalyticsService:
                 .order_by(func.sum(Expense.amount).desc())
                 .all()
             )
+
             grand_total = sum(float(r.total or 0) for r in rows)
             return [
                 {
@@ -157,8 +189,10 @@ class ExpenseAnalyticsService:
             logger.exception("get_expense_by_department failed")
             return []
 
+            return []
+
     # ------------------------------------------------------------------
-    # Expense-to-revenue ratio
+    # Expense-to-revenue ratio trend
     # ------------------------------------------------------------------
 
     def get_expense_to_revenue_ratio(
@@ -166,65 +200,90 @@ class ExpenseAnalyticsService:
         start_date: Optional[date] = None,
         end_date: Optional[date] = None,
     ) -> List[dict]:
-        """Monthly ratio of approved expenses to net revenue (as a percentage)."""
+        """Monthly expense-to-revenue ratio."""
         try:
             params: dict = {}
-            exp_start = "AND e.expense_date >= :start_date" if start_date else ""
-            exp_end   = "AND e.expense_date <= :end_date"   if end_date   else ""
-            rev_start = "AND t.transaction_date >= :start_date" if start_date else ""
-            rev_end   = "AND t.transaction_date <= :end_date"   if end_date   else ""
+            exp_start = "AND expense_date >= :start_date" if start_date else ""
+            exp_end   = "AND expense_date <= :end_date"   if end_date   else ""
+            rev_start = "AND transaction_date >= :start_date" if start_date else ""
+            rev_end   = "AND transaction_date <= :end_date"   if end_date   else ""
             if start_date:
                 params["start_date"] = start_date
             if end_date:
                 params["end_date"] = end_date
 
-            stmt = text(
+            if self._is_sqlite():
+                exp_period = "strftime('%Y-%m-01', expense_date)"
+                rev_period = "strftime('%Y-%m-01', transaction_date)"
+            else:
+                exp_period = "DATE_TRUNC('month', expense_date)::date"
+                rev_period = "DATE_TRUNC('month', transaction_date)::date"
+
+            exp_stmt = text(
                 f"""
-                WITH monthly_expenses AS (
-                    SELECT
-                        DATE_TRUNC('month', expense_date)::date AS period,
-                        SUM(amount)                             AS total_expenses
-                    FROM expenses
-                    WHERE status = 'approved'
-                      {exp_start} {exp_end}
-                    GROUP BY period
-                ),
-                monthly_revenue AS (
-                    SELECT
-                        DATE_TRUNC('month', transaction_date)::date             AS period,
-                        SUM(amount * (1 - discount_pct / 100.0))               AS total_revenue
-                    FROM transactions
-                    WHERE transaction_type = 'sale'
-                      AND status = 'completed'
-                      {rev_start} {rev_end}
-                    GROUP BY period
-                )
                 SELECT
-                    COALESCE(e.period, r.period)               AS period,
-                    COALESCE(e.total_expenses, 0)              AS total_expenses,
-                    COALESCE(r.total_revenue, 0)               AS total_revenue
-                FROM monthly_expenses e
-                FULL OUTER JOIN monthly_revenue r USING (period)
-                ORDER BY period
+                    {exp_period} AS period,
+                    SUM(amount)  AS total_expenses
+                FROM expenses
+                WHERE status = 'approved'
+                  {exp_start} {exp_end}
+                GROUP BY period
                 """
             )
-            rows = self.db.execute(stmt, params).fetchall()
-            return [
-                {
-                    "date": row.period.isoformat(),
-                    "label": row.period.strftime("%b %Y"),
-                    "total_expenses": round(float(row.total_expenses or 0), 2),
-                    "total_revenue": round(float(row.total_revenue or 0), 2),
-                    "expense_to_revenue_pct": round(
-                        safe_divide(
-                            float(row.total_expenses or 0),
-                            float(row.total_revenue or 0),
-                        ) * 100,
-                        2,
-                    ),
-                }
-                for row in rows
-            ]
+            rev_stmt = text(
+                f"""
+                SELECT
+                    {rev_period}                             AS period,
+                    SUM(amount * (1 - discount_pct / 100.0)) AS total_revenue
+                FROM transactions
+                WHERE transaction_type = 'sale'
+                  AND status = 'completed'
+                  {rev_start} {rev_end}
+                GROUP BY period
+                """
+            )
+            exp_rows = self.db.execute(exp_stmt, params).fetchall()
+            rev_rows = self.db.execute(rev_stmt, params).fetchall()
+
+            data_map: dict = {}
+            for r in exp_rows:
+                p_str = str(r.period)[:10]
+                data_map.setdefault(p_str, {"period": r.period, "expenses": 0.0, "revenue": 0.0})
+                data_map[p_str]["expenses"] = float(r.total_expenses or 0)
+
+            for r in rev_rows:
+                p_str = str(r.period)[:10]
+                data_map.setdefault(p_str, {"period": r.period, "expenses": 0.0, "revenue": 0.0})
+                data_map[p_str]["revenue"] = float(r.total_revenue or 0)
+
+            results = []
+            for p_str in sorted(data_map.keys()):
+                entry = data_map[p_str]
+                p = entry["period"]
+                if isinstance(p, str):
+                    try:
+                        p_dt = date.fromisoformat(p[:10])
+                        p_iso = p_dt.isoformat()
+                        p_label = p_dt.strftime("%b %Y")
+                    except Exception:
+                        p_iso = p
+                        p_label = p
+                else:
+                    p_iso = p.isoformat()
+                    p_label = p.strftime("%b %Y")
+
+                tot_exp = entry["expenses"]
+                tot_rev = entry["revenue"]
+                results.append(
+                    {
+                        "date": p_iso,
+                        "label": p_label,
+                        "total_expenses": round(tot_exp, 2),
+                        "total_revenue": round(tot_rev, 2),
+                        "expense_to_revenue_pct": round(safe_divide(tot_exp, tot_rev) * 100, 2),
+                    }
+                )
+            return results
         except Exception:
             logger.exception("get_expense_to_revenue_ratio failed")
             return []

@@ -4,7 +4,7 @@ import logging
 from datetime import date
 from typing import List, Optional
 
-from sqlalchemy import func, text
+from sqlalchemy import case, func, text
 from sqlalchemy.orm import Session
 
 from app.models import CashFlow, Category
@@ -43,6 +43,12 @@ class CashFlowService:
     # Cash flow trend
     # ------------------------------------------------------------------
 
+    def _is_sqlite(self) -> bool:
+        try:
+            return self.db.bind.dialect.name == "sqlite"
+        except Exception:
+            return False
+
     def get_cashflow_trend(
         self,
         start_date: Optional[date] = None,
@@ -51,10 +57,15 @@ class CashFlowService:
         """Monthly inflow, outflow and net cash flow (three series)."""
         try:
             date_clauses, params = self._date_clauses_and_params(start_date, end_date)
+            if self._is_sqlite():
+                period_sql = "strftime('%Y-%m-01', flow_date)"
+            else:
+                period_sql = "DATE_TRUNC('month', flow_date)::date"
+
             stmt = text(
                 f"""
                 SELECT
-                    DATE_TRUNC('month', flow_date)::date                             AS period,
+                    {period_sql}                                                     AS period,
                     SUM(CASE WHEN flow_type = 'inflow'  THEN amount ELSE 0 END)      AS inflow,
                     SUM(CASE WHEN flow_type = 'outflow' THEN amount ELSE 0 END)      AS outflow
                 FROM cash_flows
@@ -64,18 +75,33 @@ class CashFlowService:
                 """
             )
             rows = self.db.execute(stmt, params).fetchall()
-            return [
-                {
-                    "date": row.period.isoformat(),
-                    "label": row.period.strftime("%b %Y"),
-                    "inflow": round(float(row.inflow or 0), 2),
-                    "outflow": round(float(row.outflow or 0), 2),
-                    "net_cash_flow": round(
-                        float(row.inflow or 0) - float(row.outflow or 0), 2
-                    ),
-                }
-                for row in rows
-            ]
+            results = []
+            for row in rows:
+                p = row.period
+                if isinstance(p, str):
+                    try:
+                        p_dt = date.fromisoformat(p[:10])
+                        period_iso = p_dt.isoformat()
+                        period_label = p_dt.strftime("%b %Y")
+                    except Exception:
+                        period_iso = p
+                        period_label = p
+                else:
+                    period_iso = p.isoformat()
+                    period_label = p.strftime("%b %Y")
+
+                inflow = float(row.inflow or 0)
+                outflow = float(row.outflow or 0)
+                results.append(
+                    {
+                        "date": period_iso,
+                        "label": period_label,
+                        "inflow": round(inflow, 2),
+                        "outflow": round(outflow, 2),
+                        "net_cash_flow": round(inflow - outflow, 2),
+                    }
+                )
+            return results
         except Exception:
             logger.exception("get_cashflow_trend failed")
             return []
@@ -101,13 +127,13 @@ class CashFlowService:
                 self.db.query(
                     Category.name,
                     func.sum(
-                        func.case(
+                        case(
                             (CashFlow.flow_type == "inflow", CashFlow.amount),
                             else_=0,
                         )
                     ).label("inflow"),
                     func.sum(
-                        func.case(
+                        case(
                             (CashFlow.flow_type == "outflow", CashFlow.amount),
                             else_=0,
                         )
@@ -149,11 +175,16 @@ class CashFlowService:
         """Running cumulative net cash flow over the period (monthly)."""
         try:
             date_clauses, params = self._date_clauses_and_params(start_date, end_date)
+            if self._is_sqlite():
+                period_sql = "strftime('%Y-%m-01', flow_date)"
+            else:
+                period_sql = "DATE_TRUNC('month', flow_date)::date"
+
             stmt = text(
                 f"""
                 WITH monthly AS (
                     SELECT
-                        DATE_TRUNC('month', flow_date)::date                         AS period,
+                        {period_sql}                                                 AS period,
                         SUM(CASE WHEN flow_type = 'inflow'  THEN amount ELSE 0 END)  AS inflow,
                         SUM(CASE WHEN flow_type = 'outflow' THEN amount ELSE 0 END)  AS outflow
                     FROM cash_flows
@@ -172,17 +203,33 @@ class CashFlowService:
                 """
             )
             rows = self.db.execute(stmt, params).fetchall()
-            return [
-                {
-                    "date": row.period.isoformat(),
-                    "label": row.period.strftime("%b %Y"),
-                    "inflow": round(float(row.inflow or 0), 2),
-                    "outflow": round(float(row.outflow or 0), 2),
-                    "net": round(float(row.net or 0), 2),
-                    "cumulative_net": round(float(row.cumulative_net or 0), 2),
-                }
-                for row in rows
-            ]
+            results = []
+            for row in rows:
+                p = row.period
+                if isinstance(p, str):
+                    try:
+                        p_dt = date.fromisoformat(p[:10])
+                        period_iso = p_dt.isoformat()
+                        period_label = p_dt.strftime("%b %Y")
+                    except Exception:
+                        period_iso = p
+                        period_label = p
+                else:
+                    period_iso = p.isoformat()
+                    period_label = p.strftime("%b %Y")
+
+                results.append(
+                    {
+                        "date": period_iso,
+                        "label": period_label,
+                        "inflow": round(float(row.inflow or 0), 2),
+                        "outflow": round(float(row.outflow or 0), 2),
+                        "net": round(float(row.net or 0), 2),
+                        "cumulative_net": round(float(row.cumulative_net or 0), 2),
+                    }
+                )
+            return results
         except Exception:
             logger.exception("get_cumulative_cashflow failed")
             return []
+

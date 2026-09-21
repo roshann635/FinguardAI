@@ -32,11 +32,17 @@ class ProfitabilityService:
     def _cogs_expr():
         return Transaction.cost * Transaction.quantity
 
+    def _is_sqlite(self) -> bool:
+        try:
+            return self.db.bind.dialect.name == "sqlite"
+        except Exception:
+            return False
+
     def _monthly_revenue_and_cogs(
         self,
         start_date: Optional[date],
         end_date: Optional[date],
-    ):
+    ) -> list:
         """Return rows of (period, revenue, cogs) per month."""
         params: dict = {}
         date_clauses = ""
@@ -47,12 +53,17 @@ class ProfitabilityService:
             date_clauses += " AND transaction_date <= :end_date"
             params["end_date"] = end_date
 
+        if self._is_sqlite():
+            period_sql = "strftime('%Y-%m-01', transaction_date)"
+        else:
+            period_sql = "DATE_TRUNC('month', transaction_date)::date"
+
         stmt = text(
             f"""
             SELECT
-                DATE_TRUNC('month', transaction_date)::date          AS period,
-                SUM(amount * (1 - discount_pct / 100.0))             AS revenue,
-                SUM(cost * quantity)                                  AS cogs
+                {period_sql}                         AS period,
+                SUM(amount * (1 - discount_pct / 100.0)) AS revenue,
+                SUM(cost * quantity)                  AS cogs
             FROM transactions
             WHERE transaction_type = 'sale'
               AND status = 'completed'
@@ -78,11 +89,16 @@ class ProfitabilityService:
             date_clauses += " AND expense_date <= :end_date"
             params["end_date"] = end_date
 
+        if self._is_sqlite():
+            period_sql = "strftime('%Y-%m-01', expense_date)"
+        else:
+            period_sql = "DATE_TRUNC('month', expense_date)::date"
+
         stmt = text(
             f"""
             SELECT
-                DATE_TRUNC('month', expense_date)::date AS period,
-                SUM(amount)                             AS total_expenses
+                {period_sql} AS period,
+                SUM(amount)  AS total_expenses
             FROM expenses
             WHERE status = 'approved'
               {date_clauses}
@@ -90,7 +106,11 @@ class ProfitabilityService:
             """
         )
         rows = self.db.execute(stmt, params).fetchall()
-        return {row.period.isoformat(): float(row.total_expenses or 0) for row in rows}
+        result = {}
+        for r in rows:
+            p_str = str(r.period)[:10]
+            result[p_str] = float(r.total_expenses or 0)
+        return result
 
     # ------------------------------------------------------------------
     # Profit trend
@@ -108,16 +128,28 @@ class ProfitabilityService:
 
             results = []
             for row in revenue_rows:
-                period_iso = row.period.isoformat()
+                p = row.period
+                if isinstance(p, str):
+                    try:
+                        p_dt = date.fromisoformat(p[:10])
+                        period_iso = p_dt.isoformat()
+                        period_label = p_dt.strftime("%b %Y")
+                    except Exception:
+                        period_iso = p
+                        period_label = p
+                else:
+                    period_iso = p.isoformat()
+                    period_label = p.strftime("%b %Y")
+
                 revenue = float(row.revenue or 0)
                 cogs = float(row.cogs or 0)
                 gross_profit = revenue - cogs
-                expenses = expenses_map.get(period_iso, 0.0)
+                expenses = expenses_map.get(period_iso[:10], 0.0)
                 net_profit = revenue - expenses
                 results.append(
                     {
                         "date": period_iso,
-                        "label": row.period.strftime("%b %Y"),
+                        "label": period_label,
                         "gross_profit": round(gross_profit, 2),
                         "net_profit": round(net_profit, 2),
                     }
@@ -143,17 +175,29 @@ class ProfitabilityService:
 
             results = []
             for row in revenue_rows:
-                period_iso = row.period.isoformat()
+                p = row.period
+                if isinstance(p, str):
+                    try:
+                        p_dt = date.fromisoformat(p[:10])
+                        period_iso = p_dt.isoformat()
+                        period_label = p_dt.strftime("%b %Y")
+                    except Exception:
+                        period_iso = p
+                        period_label = p
+                else:
+                    period_iso = p.isoformat()
+                    period_label = p.strftime("%b %Y")
+
                 revenue = float(row.revenue or 0)
                 cogs = float(row.cogs or 0)
                 gross_profit = revenue - cogs
-                expenses = expenses_map.get(period_iso, 0.0)
+                expenses = expenses_map.get(period_iso[:10], 0.0)
                 net_profit = revenue - expenses
 
                 results.append(
                     {
                         "date": period_iso,
-                        "label": row.period.strftime("%b %Y"),
+                        "label": period_label,
                         "gross_margin_pct": round(safe_divide(gross_profit, revenue) * 100, 2),
                         "net_margin_pct": round(safe_divide(net_profit, revenue) * 100, 2),
                     }

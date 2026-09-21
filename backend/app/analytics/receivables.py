@@ -1,7 +1,7 @@
 """Receivables analytics service for FinGuard AI."""
 
 import logging
-from datetime import date
+from datetime import date, datetime
 from typing import List, Optional
 
 from sqlalchemy import func, text
@@ -91,7 +91,14 @@ class ReceivablesService:
             )
 
     # ------------------------------------------------------------------
-    # Aging trend
+    def _is_sqlite(self) -> bool:
+        try:
+            return self.db.bind.dialect.name == "sqlite"
+        except Exception:
+            return False
+
+    # ------------------------------------------------------------------
+    # Ageing trend
     # ------------------------------------------------------------------
 
     def get_aging_trend(self, months: int = 6) -> List[dict]:
@@ -100,52 +107,111 @@ class ReceivablesService:
         Uses invoice_date as the time axis (approximates how the book looked that month).
         """
         try:
-            stmt = text(
-                f"""
-                WITH monthly AS (
-                    SELECT
-                        DATE_TRUNC('month', invoice_date)::date              AS period,
-                        SUM(CASE
-                                WHEN (:as_of_date - due_date) <= 30
-                                THEN invoice_amount - paid_amount ELSE 0
-                            END)                                             AS bucket_0_30,
-                        SUM(CASE
-                                WHEN (:as_of_date - due_date) BETWEEN 31 AND 60
-                                THEN invoice_amount - paid_amount ELSE 0
-                            END)                                             AS bucket_31_60,
-                        SUM(CASE
-                                WHEN (:as_of_date - due_date) BETWEEN 61 AND 90
-                                THEN invoice_amount - paid_amount ELSE 0
-                            END)                                             AS bucket_61_90,
-                        SUM(CASE
-                                WHEN (:as_of_date - due_date) > 90
-                                THEN invoice_amount - paid_amount ELSE 0
-                            END)                                             AS bucket_90_plus
-                    FROM invoices
-                    WHERE payment_status IN ('unpaid', 'partial', 'overdue')
-                      AND invoice_date >= DATE_TRUNC('month', :as_of_date::date)
-                                         - INTERVAL '{int(months)} months'
-                    GROUP BY period
+            as_of = get_as_of_date()
+            if self._is_sqlite():
+                start_year = as_of.year
+                start_month = as_of.month - months
+                while start_month <= 0:
+                    start_month += 12
+                    start_year -= 1
+                start_d = date(start_year, start_month, 1)
+
+                stmt = text(
+                    """
+                    WITH monthly AS (
+                        SELECT
+                            strftime('%Y-%m-01', invoice_date) AS period,
+                            SUM(CASE
+                                    WHEN (julianday(:as_of_date) - julianday(due_date)) <= 30
+                                    THEN invoice_amount - paid_amount ELSE 0
+                                END) AS bucket_0_30,
+                            SUM(CASE
+                                    WHEN (julianday(:as_of_date) - julianday(due_date)) BETWEEN 31 AND 60
+                                    THEN invoice_amount - paid_amount ELSE 0
+                                END) AS bucket_31_60,
+                            SUM(CASE
+                                    WHEN (julianday(:as_of_date) - julianday(due_date)) BETWEEN 61 AND 90
+                                    THEN invoice_amount - paid_amount ELSE 0
+                                END) AS bucket_61_90,
+                            SUM(CASE
+                                    WHEN (julianday(:as_of_date) - julianday(due_date)) > 90
+                                    THEN invoice_amount - paid_amount ELSE 0
+                                END) AS bucket_90_plus
+                        FROM invoices
+                        WHERE payment_status IN ('unpaid', 'partial', 'overdue')
+                          AND invoice_date >= :start_date
+                        GROUP BY period
+                    )
+                    SELECT *,
+                           (bucket_0_30 + bucket_31_60 + bucket_61_90 + bucket_90_plus) AS total
+                    FROM monthly
+                    ORDER BY period
+                    """
                 )
-                SELECT *,
-                       (bucket_0_30 + bucket_31_60 + bucket_61_90 + bucket_90_plus) AS total
-                FROM monthly
-                ORDER BY period
-                """
-            )
-            rows = self.db.execute(stmt, {"as_of_date": get_as_of_date()}).fetchall()
-            return [
-                {
-                    "date": row.period.isoformat(),
-                    "label": row.period.strftime("%b %Y"),
-                    "bucket_0_30": round(float(row.bucket_0_30 or 0), 2),
-                    "bucket_31_60": round(float(row.bucket_31_60 or 0), 2),
-                    "bucket_61_90": round(float(row.bucket_61_90 or 0), 2),
-                    "bucket_90_plus": round(float(row.bucket_90_plus or 0), 2),
-                    "total": round(float(row.total or 0), 2),
-                }
-                for row in rows
-            ]
+                rows = self.db.execute(stmt, {"as_of_date": as_of.isoformat(), "start_date": start_d.isoformat()}).fetchall()
+            else:
+                stmt = text(
+                    f"""
+                    WITH monthly AS (
+                        SELECT
+                            DATE_TRUNC('month', invoice_date)::date              AS period,
+                            SUM(CASE
+                                    WHEN (:as_of_date - due_date) <= 30
+                                    THEN invoice_amount - paid_amount ELSE 0
+                                END)                                             AS bucket_0_30,
+                            SUM(CASE
+                                    WHEN (:as_of_date - due_date) BETWEEN 31 AND 60
+                                    THEN invoice_amount - paid_amount ELSE 0
+                                END)                                             AS bucket_31_60,
+                            SUM(CASE
+                                    WHEN (:as_of_date - due_date) BETWEEN 61 AND 90
+                                    THEN invoice_amount - paid_amount ELSE 0
+                                END)                                             AS bucket_61_90,
+                            SUM(CASE
+                                    WHEN (:as_of_date - due_date) > 90
+                                    THEN invoice_amount - paid_amount ELSE 0
+                                END)                                             AS bucket_90_plus
+                        FROM invoices
+                        WHERE payment_status IN ('unpaid', 'partial', 'overdue')
+                          AND invoice_date >= DATE_TRUNC('month', :as_of_date::date)
+                                             - INTERVAL '{int(months)} months'
+                        GROUP BY period
+                    )
+                    SELECT *,
+                           (bucket_0_30 + bucket_31_60 + bucket_61_90 + bucket_90_plus) AS total
+                    FROM monthly
+                    ORDER BY period
+                    """
+                )
+                rows = self.db.execute(stmt, {"as_of_date": as_of}).fetchall()
+
+            results = []
+            for row in rows:
+                p = row.period
+                if isinstance(p, str):
+                    try:
+                        p_dt = date.fromisoformat(p[:10])
+                        period_iso = p_dt.isoformat()
+                        period_label = p_dt.strftime("%b %Y")
+                    except Exception:
+                        period_iso = p
+                        period_label = p
+                else:
+                    period_iso = p.isoformat()
+                    period_label = p.strftime("%b %Y")
+
+                results.append(
+                    {
+                        "date": period_iso,
+                        "label": period_label,
+                        "bucket_0_30": round(float(row.bucket_0_30 or 0), 2),
+                        "bucket_31_60": round(float(row.bucket_31_60 or 0), 2),
+                        "bucket_61_90": round(float(row.bucket_61_90 or 0), 2),
+                        "bucket_90_plus": round(float(row.bucket_90_plus or 0), 2),
+                        "total": round(float(row.total or 0), 2),
+                    }
+                )
+            return results
         except Exception:
             logger.exception("get_aging_trend failed")
             return []
@@ -157,38 +223,72 @@ class ReceivablesService:
     def get_top_overdue_accounts(self, limit: int = 10) -> List[dict]:
         """Customers with the highest overdue balances (past due_date)."""
         try:
-            stmt = text(
-                f"""
-                SELECT
-                    c.customer_id,
-                    c.name                                     AS customer_name,
-                    c.segment,
-                    COUNT(i.invoice_id)                        AS invoice_count,
-                    SUM(i.invoice_amount - i.paid_amount)      AS outstanding_balance,
-                    MIN(i.due_date)                            AS oldest_due_date,
-                    MAX(:as_of_date - i.due_date)              AS max_days_overdue
-                FROM invoices i
-                JOIN customers c ON c.customer_id = i.customer_id
-                WHERE i.payment_status IN ('unpaid', 'partial', 'overdue')
-                  AND i.due_date < :as_of_date
-                GROUP BY c.customer_id, c.name, c.segment
-                ORDER BY outstanding_balance DESC
-                LIMIT {int(limit)}
-                """
-            )
-            rows = self.db.execute(stmt, {"as_of_date": get_as_of_date()}).fetchall()
-            return [
-                {
-                    "customer_id": row.customer_id,
-                    "customer_name": row.customer_name,
-                    "segment": row.segment,
-                    "invoice_count": int(row.invoice_count or 0),
-                    "outstanding_balance": round(float(row.outstanding_balance or 0), 2),
-                    "oldest_due_date": row.oldest_due_date.isoformat() if row.oldest_due_date else None,
-                    "max_days_overdue": int(row.max_days_overdue or 0),
-                }
-                for row in rows
-            ]
+            as_of = get_as_of_date()
+            if self._is_sqlite():
+                stmt = text(
+                    f"""
+                    SELECT
+                        c.customer_id,
+                        c.name                                     AS customer_name,
+                        c.segment,
+                        COUNT(i.invoice_id)                        AS invoice_count,
+                        SUM(i.invoice_amount - i.paid_amount)      AS outstanding_balance,
+                        MIN(i.due_date)                            AS oldest_due_date,
+                        MAX(julianday(:as_of_date) - julianday(i.due_date)) AS max_days_overdue
+                    FROM invoices i
+                    JOIN customers c ON c.customer_id = i.customer_id
+                    WHERE i.payment_status IN ('unpaid', 'partial', 'overdue')
+                      AND i.due_date < :as_of_date
+                    GROUP BY c.customer_id, c.name, c.segment
+                    ORDER BY outstanding_balance DESC
+                    LIMIT {int(limit)}
+                    """
+                )
+                rows = self.db.execute(stmt, {"as_of_date": as_of.isoformat()}).fetchall()
+            else:
+                stmt = text(
+                    f"""
+                    SELECT
+                        c.customer_id,
+                        c.name                                     AS customer_name,
+                        c.segment,
+                        COUNT(i.invoice_id)                        AS invoice_count,
+                        SUM(i.invoice_amount - i.paid_amount)      AS outstanding_balance,
+                        MIN(i.due_date)                            AS oldest_due_date,
+                        MAX(:as_of_date - i.due_date)              AS max_days_overdue
+                    FROM invoices i
+                    JOIN customers c ON c.customer_id = i.customer_id
+                    WHERE i.payment_status IN ('unpaid', 'partial', 'overdue')
+                      AND i.due_date < :as_of_date
+                    GROUP BY c.customer_id, c.name, c.segment
+                    ORDER BY outstanding_balance DESC
+                    LIMIT {int(limit)}
+                    """
+                )
+                rows = self.db.execute(stmt, {"as_of_date": as_of}).fetchall()
+
+            results = []
+            for row in rows:
+                oldest = row.oldest_due_date
+                if isinstance(oldest, (date, datetime)):
+                    oldest_str = oldest.isoformat()
+                elif isinstance(oldest, str):
+                    oldest_str = oldest[:10]
+                else:
+                    oldest_str = None
+
+                results.append(
+                    {
+                        "customer_id": row.customer_id,
+                        "customer_name": row.customer_name,
+                        "segment": row.segment,
+                        "invoice_count": int(row.invoice_count or 0),
+                        "outstanding_balance": round(float(row.outstanding_balance or 0), 2),
+                        "oldest_due_date": oldest_str,
+                        "max_days_overdue": int(row.max_days_overdue or 0),
+                    }
+                )
+            return results
         except Exception:
             logger.exception("get_top_overdue_accounts failed")
             return []
@@ -200,33 +300,72 @@ class ReceivablesService:
     def get_collection_efficiency(self, months: int = 6) -> List[dict]:
         """Monthly invoiced amount vs collected (paid) amount."""
         try:
-            stmt = text(
-                f"""
-                SELECT
-                    DATE_TRUNC('month', invoice_date)::date  AS period,
-                    SUM(invoice_amount)                      AS invoiced,
-                    SUM(paid_amount)                         AS collected
-                FROM invoices
-                WHERE invoice_date >= DATE_TRUNC('month', :as_of_date::date)
-                                     - INTERVAL '{int(months)} months'
-                GROUP BY period
-                ORDER BY period
-                """
-            )
-            rows = self.db.execute(stmt, {"as_of_date": get_as_of_date()}).fetchall()
-            return [
-                {
-                    "date": row.period.isoformat(),
-                    "label": row.period.strftime("%b %Y"),
-                    "invoiced": round(float(row.invoiced or 0), 2),
-                    "collected": round(float(row.collected or 0), 2),
-                    "collection_rate_pct": round(
-                        safe_divide(float(row.collected or 0), float(row.invoiced or 0)) * 100,
-                        2,
-                    ),
-                }
-                for row in rows
-            ]
+            as_of = get_as_of_date()
+            if self._is_sqlite():
+                start_year = as_of.year
+                start_month = as_of.month - months
+                while start_month <= 0:
+                    start_month += 12
+                    start_year -= 1
+                start_d = date(start_year, start_month, 1)
+
+                stmt = text(
+                    """
+                    SELECT
+                        strftime('%Y-%m-01', invoice_date) AS period,
+                        SUM(invoice_amount) AS invoiced,
+                        SUM(paid_amount)    AS collected
+                    FROM invoices
+                    WHERE invoice_date >= :start_date
+                    GROUP BY period
+                    ORDER BY period
+                    """
+                )
+                rows = self.db.execute(stmt, {"start_date": start_d.isoformat()}).fetchall()
+            else:
+                stmt = text(
+                    f"""
+                    SELECT
+                        DATE_TRUNC('month', invoice_date)::date  AS period,
+                        SUM(invoice_amount)                      AS invoiced,
+                        SUM(paid_amount)                         AS collected
+                    FROM invoices
+                    WHERE invoice_date >= DATE_TRUNC('month', :as_of_date::date)
+                                         - INTERVAL '{int(months)} months'
+                    GROUP BY period
+                    ORDER BY period
+                    """
+                )
+                rows = self.db.execute(stmt, {"as_of_date": as_of}).fetchall()
+
+            results = []
+            for row in rows:
+                p = row.period
+                if isinstance(p, str):
+                    try:
+                        p_dt = date.fromisoformat(p[:10])
+                        period_iso = p_dt.isoformat()
+                        period_label = p_dt.strftime("%b %Y")
+                    except Exception:
+                        period_iso = p
+                        period_label = p
+                else:
+                    period_iso = p.isoformat()
+                    period_label = p.strftime("%b %Y")
+
+                results.append(
+                    {
+                        "date": period_iso,
+                        "label": period_label,
+                        "invoiced": round(float(row.invoiced or 0), 2),
+                        "collected": round(float(row.collected or 0), 2),
+                        "collection_rate_pct": round(
+                            safe_divide(float(row.collected or 0), float(row.invoiced or 0)) * 100,
+                            2,
+                        ),
+                    }
+                )
+            return results
         except Exception:
             logger.exception("get_collection_efficiency failed")
             return []

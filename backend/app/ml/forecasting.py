@@ -43,9 +43,14 @@ class RevenueForecastService:
             cutoff = get_as_of_date().replace(day=1) - timedelta(days=1)
             start = (cutoff.replace(day=1) - timedelta(days=(months_history - 1) * 30)).replace(day=1)
 
+            if self.db.bind and self.db.bind.dialect.name == "sqlite":
+                period_expr = func.strftime("%Y-%m-01", Transaction.transaction_date)
+            else:
+                period_expr = func.date_trunc("month", Transaction.transaction_date)
+
             rows = (
                 self.db.query(
-                    func.date_trunc("month", Transaction.transaction_date).label("month"),
+                    period_expr.label("month"),
                     func.sum(
                         Transaction.amount * (1 - Transaction.discount_pct / 100)
                     ).label("revenue"),
@@ -56,8 +61,8 @@ class RevenueForecastService:
                     Transaction.transaction_date >= start,
                     Transaction.transaction_date <= cutoff,
                 )
-                .group_by(func.date_trunc("month", Transaction.transaction_date))
-                .order_by(func.date_trunc("month", Transaction.transaction_date))
+                .group_by(period_expr)
+                .order_by(period_expr)
                 .all()
             )
 
@@ -73,6 +78,7 @@ class RevenueForecastService:
         except Exception:
             logger.exception("_get_monthly_revenue_series failed")
             return pd.Series(dtype=float)
+
 
     # ------------------------------------------------------------------
     # Model evaluation

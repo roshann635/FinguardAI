@@ -54,11 +54,50 @@ def _create_database_engine():
 
 
 def _setup_sqlite_listeners(eng):
+    import calendar
+    import datetime
+
     @event.listens_for(eng, "connect")
     def set_sqlite_pragma(dbapi_connection, connection_record):
         cursor = dbapi_connection.cursor()
         cursor.execute("PRAGMA foreign_keys=ON")
         cursor.close()
+
+        def date_trunc(trunc, val):
+            if not val:
+                return None
+            val_str = str(val)[:10]
+            if trunc.lower() == "month":
+                return val_str[:7] + "-01"
+            elif trunc.lower() == "year":
+                return val_str[:4] + "-01-01"
+            elif trunc.lower() == "quarter":
+                m = int(val_str[5:7])
+                qm = ((m - 1) // 3) * 3 + 1
+                return f"{val_str[:4]}-{qm:02d}-01"
+            elif trunc.lower() == "week":
+                dt = datetime.date.fromisoformat(val_str)
+                return (dt - datetime.timedelta(days=dt.weekday())).isoformat()
+            return val_str
+
+        def extract(field, val):
+            if not val:
+                return 0
+            val_str = str(val)[:10]
+            dt = datetime.date.fromisoformat(val_str)
+            if field.lower() == "month":
+                return dt.month
+            elif field.lower() == "year":
+                return dt.year
+            elif field.lower() == "day":
+                return dt.day
+            return 0
+
+        dbapi_connection.create_function("date_trunc", 2, date_trunc)
+        dbapi_connection.create_function("DATE_TRUNC", 2, date_trunc)
+        dbapi_connection.create_function("extract", 2, extract)
+        dbapi_connection.create_function("EXTRACT", 2, extract)
+
 
 
 engine = _create_database_engine()

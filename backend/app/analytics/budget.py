@@ -1,7 +1,9 @@
 """Budget analytics service for FinGuard AI."""
 
 import logging
+from datetime import date, datetime
 from typing import List, Optional
+
 
 from sqlalchemy import func, text
 from sqlalchemy.orm import Session
@@ -28,6 +30,12 @@ class BudgetAnalyticsService:
     def __init__(self, db: Session) -> None:
         self.db = db
 
+    def _is_sqlite(self) -> bool:
+        try:
+            return self.db.bind.dialect.name == "sqlite"
+        except Exception:
+            return False
+
     # ------------------------------------------------------------------
     # Budget vs actual
     # ------------------------------------------------------------------
@@ -41,78 +49,68 @@ class BudgetAnalyticsService:
         try:
             import calendar
 
-            params: dict = {"year": year}
-            month_filter_budget = ""
-            month_filter_expense = ""
-
-            if months:
-                month_filter_budget = "AND b.period_month = ANY(:months)"
-                month_filter_expense = "AND EXTRACT(MONTH FROM e.expense_date) = ANY(:months)"
-                params["months"] = months
-                # Build expense date range covering all requested months
-                min_month = min(months)
-                max_month = max(months)
-                last_day = calendar.monthrange(year, max_month)[1]
-                params["exp_start"] = f"{year}-{min_month:02d}-01"
-                params["exp_end"] = f"{year}-{max_month:02d}-{last_day:02d}"
-                expense_date_range = (
-                    "AND e.expense_date BETWEEN :exp_start::date AND :exp_end::date"
+            # Query budgets
+            b_query = (
+                self.db.query(
+                    Budget.category_id,
+                    Budget.department_id,
+                    func.sum(Budget.budget_amount).label("budget_total"),
                 )
-            else:
-                params["exp_start"] = f"{year}-01-01"
-                params["exp_end"] = f"{year}-12-31"
-                expense_date_range = (
-                    "AND e.expense_date BETWEEN :exp_start::date AND :exp_end::date"
-                )
-
-            stmt = text(
-                f"""
-                WITH budget_agg AS (
-                    SELECT
-                        b.category_id,
-                        b.department_id,
-                        SUM(b.budget_amount) AS budget_total
-                    FROM budgets b
-                    WHERE b.period_year = :year
-                      {month_filter_budget}
-                    GROUP BY b.category_id, b.department_id
-                ),
-                expense_agg AS (
-                    SELECT
-                        e.category_id,
-                        e.department_id,
-                        SUM(e.amount) AS actual_total
-                    FROM expenses e
-                    WHERE e.status = 'approved'
-                      {expense_date_range}
-                      {month_filter_expense}
-                    GROUP BY e.category_id, e.department_id
-                )
-                SELECT
-                    c.name                                           AS category,
-                    d.name                                           AS department,
-                    COALESCE(ba.budget_total, 0)                     AS budget,
-                    COALESCE(ea.actual_total, 0)                     AS actual
-                FROM budget_agg ba
-                FULL OUTER JOIN expense_agg ea
-                    ON ba.category_id  = ea.category_id
-                   AND ba.department_id = ea.department_id
-                JOIN categories  c ON c.category_id  = COALESCE(ba.category_id,  ea.category_id)
-                JOIN departments d ON d.department_id = COALESCE(ba.department_id, ea.department_id)
-                ORDER BY category, department
-                """
+                .filter(Budget.period_year == year)
             )
-            rows = self.db.execute(stmt, params).fetchall()
+            if months:
+                b_query = b_query.filter(Budget.period_month.in_(months))
+            budget_rows = b_query.group_by(Budget.category_id, Budget.department_id).all()
+
+            # Query expenses
+            min_m = min(months) if months else 1
+            max_m = max(months) if months else 12
+            last_d = calendar.monthrange(year, max_m)[1]
+            start_date = date(year, min_m, 1)
+            end_date = date(year, max_m, last_d)
+
+            e_query = (
+                self.db.query(
+                    Expense.category_id,
+                    Expense.department_id,
+                    func.sum(Expense.amount).label("actual_total"),
+                )
+                .filter(
+                    Expense.status == "approved",
+                    Expense.expense_date >= start_date,
+                    Expense.expense_date <= end_date,
+                )
+            )
+            expense_rows = e_query.group_by(Expense.category_id, Expense.department_id).all()
+
+            # Fetch category and department names map
+            categories = {c.category_id: c.name for c in self.db.query(Category).all()}
+            departments = {d.department_id: d.name for d in self.db.query(Department).all()}
+
+            # Merge by (category_id, department_id)
+            merged: dict = {}
+            for row in budget_rows:
+                key = (row.category_id, row.department_id)
+                merged.setdefault(key, {"budget": 0.0, "actual": 0.0})
+                merged[key]["budget"] = float(row.budget_total or 0)
+
+            for row in expense_rows:
+                key = (row.category_id, row.department_id)
+                merged.setdefault(key, {"budget": 0.0, "actual": 0.0})
+                merged[key]["actual"] = float(row.actual_total or 0)
+
             results: List[BudgetVarianceItem] = []
-            for row in rows:
-                budget = float(row.budget or 0)
-                actual = float(row.actual or 0)
+            for (cat_id, dept_id), data in merged.items():
+                cat_name = categories.get(cat_id, "Unknown")
+                dept_name = departments.get(dept_id, "Unknown")
+                budget = data["budget"]
+                actual = data["actual"]
                 variance = actual - budget
                 variance_pct = round(safe_divide(variance, budget) * 100, 2)
                 results.append(
                     BudgetVarianceItem(
-                        category=row.category,
-                        department=row.department,
+                        category=cat_name,
+                        department=dept_name,
                         budget=round(budget, 2),
                         actual=round(actual, 2),
                         variance=round(variance, 2),
@@ -120,6 +118,7 @@ class BudgetAnalyticsService:
                         status=_budget_status(variance_pct),
                     )
                 )
+            results.sort(key=lambda x: (x.category, x.department))
             return results
         except Exception:
             logger.exception("get_budget_vs_actual failed")
@@ -132,57 +131,55 @@ class BudgetAnalyticsService:
     def get_budget_trend(self, year: int) -> List[dict]:
         """Monthly budget vs actual spending across the year."""
         try:
-            stmt = text(
-                """
-                WITH monthly_budget AS (
-                    SELECT
-                        period_month,
-                        SUM(budget_amount) AS budget_total
-                    FROM budgets
-                    WHERE period_year = :year
-                    GROUP BY period_month
-                ),
-                monthly_actual AS (
-                    SELECT
-                        EXTRACT(MONTH FROM expense_date)::int AS period_month,
-                        SUM(amount)                           AS actual_total
-                    FROM expenses
-                    WHERE status = 'approved'
-                      AND EXTRACT(YEAR FROM expense_date) = :year
-                    GROUP BY period_month
-                )
-                SELECT
-                    COALESCE(b.period_month, a.period_month)  AS month,
-                    COALESCE(b.budget_total, 0)               AS budget,
-                    COALESCE(a.actual_total, 0)               AS actual
-                FROM monthly_budget b
-                FULL OUTER JOIN monthly_actual a USING (period_month)
-                ORDER BY month
-                """
-            )
-            rows = self.db.execute(stmt, {"year": year}).fetchall()
             import calendar as cal
 
-            return [
-                {
-                    "month": int(row.month),
-                    "month_label": cal.month_abbr[int(row.month)],
-                    "budget": round(float(row.budget or 0), 2),
-                    "actual": round(float(row.actual or 0), 2),
-                    "variance": round(float(row.actual or 0) - float(row.budget or 0), 2),
-                    "variance_pct": round(
-                        safe_divide(
-                            float(row.actual or 0) - float(row.budget or 0),
-                            float(row.budget or 0),
-                        ) * 100,
-                        2,
-                    ),
-                }
-                for row in rows
-            ]
+            b_rows = (
+                self.db.query(
+                    Budget.period_month,
+                    func.sum(Budget.budget_amount).label("budget_total"),
+                )
+                .filter(Budget.period_year == year)
+                .group_by(Budget.period_month)
+                .all()
+            )
+            budget_map = {int(r.period_month): float(r.budget_total or 0) for r in b_rows}
+
+            start_d = date(year, 1, 1)
+            end_d = date(year, 12, 31)
+            expenses = (
+                self.db.query(Expense.expense_date, Expense.amount)
+                .filter(
+                    Expense.status == "approved",
+                    Expense.expense_date >= start_d,
+                    Expense.expense_date <= end_d,
+                )
+                .all()
+            )
+            actual_map: dict = {}
+            for exp in expenses:
+                m = exp.expense_date.month if hasattr(exp.expense_date, "month") else int(str(exp.expense_date)[5:7])
+                actual_map[m] = actual_map.get(m, 0.0) + float(exp.amount or 0)
+
+            results = []
+            for m in range(1, 13):
+                b = budget_map.get(m, 0.0)
+                a = actual_map.get(m, 0.0)
+                var = a - b
+                results.append(
+                    {
+                        "month": m,
+                        "month_label": cal.month_abbr[m],
+                        "budget": round(b, 2),
+                        "actual": round(a, 2),
+                        "variance": round(var, 2),
+                        "variance_pct": round(safe_divide(var, b) * 100, 2),
+                    }
+                )
+            return results
         except Exception:
             logger.exception("get_budget_trend failed")
             return []
+
 
     # ------------------------------------------------------------------
     # Overspending areas
