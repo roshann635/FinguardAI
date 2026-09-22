@@ -14,8 +14,8 @@ import Methodology from './pages/Methodology'
 const PAGE_TITLES: Record<string, string> = {
   '/overview': 'Executive Overview',
   '/performance': 'Financial Performance',
-  '/cashflow': 'Financial Performance',
-  '/budget': 'Financial Performance',
+  '/cashflow': 'Cash Flow Analysis',
+  '/budget': 'Budget & Expense Variances',
   '/risk': 'Risk Intelligence',
   '/forecasts': 'Revenue Forecasts',
   '/ai-analyst': 'AI Analyst',
@@ -35,9 +35,9 @@ export default function App() {
       <Routes>
         <Route path="/" element={<Navigate to="/overview" replace />} />
         <Route path="/overview" element={<LayoutRoute path="/overview" element={<Overview />} />} />
-        <Route path="/performance" element={<LayoutRoute path="/performance" element={<FinancialPerformance />} />} />
-        <Route path="/cashflow" element={<Navigate to="/performance" replace />} />
-        <Route path="/budget" element={<Navigate to="/performance" replace />} />
+        <Route path="/performance" element={<LayoutRoute path="/performance" element={<FinancialPerformance defaultTab="revenue" />} />} />
+        <Route path="/cashflow" element={<LayoutRoute path="/cashflow" element={<FinancialPerformance defaultTab="cashflow" />} />} />
+        <Route path="/budget" element={<LayoutRoute path="/budget" element={<FinancialPerformance defaultTab="budget" />} />} />
         <Route path="/risk" element={<LayoutRoute path="/risk" element={<RiskIntelligence />} />} />
         <Route path="/forecasts" element={<LayoutRoute path="/forecasts" element={<Forecasts />} />} />
         <Route path="/ai-analyst" element={<LayoutRoute path="/ai-analyst" element={<AIAnalyst />} />} />

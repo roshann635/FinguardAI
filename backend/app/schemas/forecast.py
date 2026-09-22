@@ -5,10 +5,12 @@ from pydantic import BaseModel
 
 class ForecastPoint(BaseModel):
     date: str
-    forecast: float
-    lower_bound: float
-    upper_bound: float
-    is_actual: bool
+    forecast: Optional[float] = None
+    actual: Optional[float] = None
+    lower_bound: Optional[float] = None
+    upper_bound: Optional[float] = None
+    is_actual: bool = True
+    is_forecast: bool = False
 
 
 class ForecastResult(BaseModel):

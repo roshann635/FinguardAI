@@ -43,7 +43,7 @@ def get_system_info(db: Session = Depends(get_db)) -> Dict[str, Any]:
         counts["customers"] = db.query(func.count(Customer.customer_id)).scalar() or 0
         counts["vendors"] = db.query(func.count(Vendor.vendor_id)).scalar() or 0
         counts["products"] = db.query(func.count(Product.product_id)).scalar() or 0
-        counts["cash_flows"] = db.query(func.count(CashFlow.flow_id)).scalar() or 0
+        counts["cash_flows"] = db.query(func.count(CashFlow.cashflow_id)).scalar() or 0
         counts["budgets"] = db.query(func.count(Budget.budget_id)).scalar() or 0
     except Exception as exc:
         logger.warning("Failed to query full record counts: %s", exc)

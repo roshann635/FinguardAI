@@ -4,23 +4,26 @@ import {
   fetchProfitAnalytics,
   fetchExpenseAnalytics,
   fetchCashFlowAnalytics,
+  fetchBudgetAnalytics,
 } from '../services/api'
-import type { RevenueAnalytics, ProfitAnalytics, ExpenseAnalytics, CashFlowAnalytics } from '../types'
+import type { RevenueAnalytics, ProfitAnalytics, ExpenseAnalytics, CashFlowAnalytics, BudgetAnalytics } from '../types'
 import RevenueChart from '../components/charts/RevenueChart'
 import ProfitMarginChart from '../components/charts/ProfitMarginChart'
 import CategoryBarChart from '../components/charts/CategoryBarChart'
 import CashFlowChart from '../components/charts/CashFlowChart'
+import BudgetVarianceChart from '../components/charts/BudgetVarianceChart'
 import LoadingSkeleton from '../components/ui/LoadingSkeleton'
 import ErrorState from '../components/ui/ErrorState'
 import { useFilters } from '../components/layout/Layout'
 import { formatINR, formatPct } from '../utils/format'
 
-type Tab = 'revenue' | 'profitability' | 'expenses' | 'cashflow'
+type Tab = 'revenue' | 'profitability' | 'expenses' | 'budget' | 'cashflow'
 
 const TABS: { id: Tab; label: string }[] = [
   { id: 'revenue', label: 'Revenue Analytics' },
   { id: 'profitability', label: 'Profitability' },
   { id: 'expenses', label: 'Expenses' },
+  { id: 'budget', label: 'Budget & Variances' },
   { id: 'cashflow', label: 'Cash Flow' },
 ]
 
@@ -105,10 +108,10 @@ function RevenueTab({ period }: { period: string }) {
             </thead>
             <tbody>
               {data.top_contributors.map((c, i) => (
-                <tr key={i} className="border-b border-slate-50">
-                  <td className="py-2 text-slate-700">{c.name}</td>
-                  <td className="py-2 text-right font-medium text-slate-800">{c.formatted ?? formatINR(c.value)}</td>
-                  <td className="py-2 text-right text-slate-500">{formatPct(c.pct)}</td>
+                <tr key={i} className="border-b border-slate-50 hover:bg-slate-50/60">
+                  <td className="py-2 text-slate-700 font-medium">{c.name}</td>
+                  <td className="py-2 text-right font-semibold text-slate-800">{c.formatted ?? formatINR(c.value)}</td>
+                  <td className="py-2 text-right text-slate-500 font-mono text-xs">{formatPct(c.pct)}</td>
                 </tr>
               ))}
             </tbody>
@@ -196,6 +199,89 @@ function ExpensesTab({ period }: { period: string }) {
   )
 }
 
+// ─── Budget & Variances Tab ───────────────────────────────────────────────────
+
+function BudgetTab() {
+  const [data, setData] = useState<BudgetAnalytics | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+
+  const load = useCallback(async () => {
+    setLoading(true); setError(null)
+    try { setData(await fetchBudgetAnalytics()) }
+    catch (e) { setError(e instanceof Error ? e.message : 'Failed') }
+    finally { setLoading(false) }
+  }, [])
+
+  useEffect(() => { load() }, [load])
+
+  if (loading) return <SkeletonSection />
+  if (error) return <ErrorState message={error} retry={load} />
+  if (!data) return null
+
+  return (
+    <div className="space-y-4">
+      <SectionCard title={`Budget vs Actual Expenditures (${data.year})`}>
+        <BudgetVarianceChart data={data.variance} height={320} />
+      </SectionCard>
+
+      <div className="grid grid-cols-3 gap-4">
+        <div className="bg-white border border-slate-200 rounded-lg p-4 shadow-sm">
+          <span className="text-xs font-medium text-slate-500 uppercase">Total Budget Allocated</span>
+          <p className="text-xl font-bold text-slate-800 mt-1">{formatINR(data.summary.total_budget)}</p>
+        </div>
+        <div className="bg-white border border-slate-200 rounded-lg p-4 shadow-sm">
+          <span className="text-xs font-medium text-slate-500 uppercase">Total Actual Spend</span>
+          <p className="text-xl font-bold text-slate-800 mt-1">{formatINR(data.summary.total_actual)}</p>
+        </div>
+        <div className="bg-white border border-slate-200 rounded-lg p-4 shadow-sm">
+          <span className="text-xs font-medium text-slate-500 uppercase">Over-Budget Categories</span>
+          <p className={`text-xl font-bold mt-1 ${data.summary.over_budget_count > 0 ? 'text-amber-600' : 'text-emerald-600'}`}>
+            {data.summary.over_budget_count} Categories
+          </p>
+        </div>
+      </div>
+
+      <SectionCard title="Detailed Department Budget Allocations">
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-xs text-slate-500 border-b border-slate-100 bg-slate-50">
+                <th className="text-left py-2.5 px-3 font-semibold">Category / Department</th>
+                <th className="text-right py-2.5 px-3 font-semibold">Budget</th>
+                <th className="text-right py-2.5 px-3 font-semibold">Actual Spend</th>
+                <th className="text-right py-2.5 px-3 font-semibold">Variance</th>
+                <th className="text-right py-2.5 px-3 font-semibold">Variance %</th>
+                <th className="text-center py-2.5 px-3 font-semibold">Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.variance.map((v, i) => (
+                <tr key={i} className="border-b border-slate-50 hover:bg-slate-50/60">
+                  <td className="py-2 px-3 text-slate-700 font-medium">{v.category}</td>
+                  <td className="py-2 px-3 text-right text-slate-600">{formatINR(v.budget)}</td>
+                  <td className="py-2 px-3 text-right font-semibold text-slate-800">{formatINR(v.actual)}</td>
+                  <td className="py-2 px-3 text-right text-slate-600">{formatINR(v.variance)}</td>
+                  <td className={`py-2 px-3 text-right font-mono text-xs font-semibold ${v.variance_pct > 0 ? 'text-red-600' : 'text-emerald-600'}`}>
+                    {v.variance_pct > 0 ? `+${v.variance_pct.toFixed(1)}%` : `${v.variance_pct.toFixed(1)}%`}
+                  </td>
+                  <td className="py-2 px-3 text-center">
+                    <span className={`px-2 py-0.5 rounded-full text-xs font-semibold ${
+                      v.status === 'over' ? 'bg-red-100 text-red-700' : v.status === 'under' ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'
+                    }`}>
+                      {v.status === 'over' ? 'Over Budget' : v.status === 'under' ? 'Under Budget' : 'On Track'}
+                    </span>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </SectionCard>
+    </div>
+  )
+}
+
 // ─── Cash Flow Tab ────────────────────────────────────────────────────────────
 
 function CashFlowTab({ period }: { period: string }) {
@@ -235,15 +321,19 @@ function CashFlowTab({ period }: { period: string }) {
 
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
-export default function FinancialPerformance() {
+export default function FinancialPerformance({ defaultTab = 'revenue' }: { defaultTab?: Tab }) {
   const { period } = useFilters()
-  const [activeTab, setActiveTab] = useState<Tab>('revenue')
+  const [activeTab, setActiveTab] = useState<Tab>(defaultTab)
+
+  useEffect(() => {
+    setActiveTab(defaultTab)
+  }, [defaultTab])
 
   return (
     <div className="space-y-5">
       <div>
         <h1 className="text-2xl font-bold text-slate-800">Financial Performance</h1>
-        <p className="text-sm text-slate-500 mt-1">Detailed analytics across revenue, profitability, expenses and cash flow.</p>
+        <p className="text-sm text-slate-500 mt-1">Detailed analytics across revenue, profitability, expenses, budgets and cash flow.</p>
       </div>
 
       {/* Tabs */}
@@ -267,6 +357,7 @@ export default function FinancialPerformance() {
       {activeTab === 'revenue' && <RevenueTab period={period} />}
       {activeTab === 'profitability' && <ProfitabilityTab period={period} />}
       {activeTab === 'expenses' && <ExpensesTab period={period} />}
+      {activeTab === 'budget' && <BudgetTab />}
       {activeTab === 'cashflow' && <CashFlowTab period={period} />}
     </div>
   )

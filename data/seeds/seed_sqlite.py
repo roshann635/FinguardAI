@@ -80,6 +80,7 @@ def generate_sqlite_db():
     for table in Base.metadata.tables.values():
         table.constraints = {c for c in table.constraints if not isinstance(c, CheckConstraint)}
 
+    Base.metadata.drop_all(bind=engine)
     Base.metadata.create_all(bind=engine)
 
     Session = sessionmaker(bind=engine)

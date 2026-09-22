@@ -96,11 +96,10 @@ def get_as_of_date() -> date:
         except ValueError:
             pass
 
-    logger.warning(
-        "get_as_of_date() called before init_as_of_date(); falling back to date.today(). "
-        "This may produce empty analytics if the dataset does not cover today's date."
+    logger.info(
+        "get_as_of_date() default fallback applied: 2025-03-31."
     )
-    return date.today()
+    return date(2025, 3, 31)
 
 
 def get_as_of_date_iso() -> str:
