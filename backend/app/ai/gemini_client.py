@@ -5,7 +5,12 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
-import google.generativeai as genai
+try:
+    import google.generativeai as genai
+    GENAI_AVAILABLE = True
+except ImportError:
+    genai = None
+    GENAI_AVAILABLE = False
 
 from app.config.settings import settings
 from app.schemas.ai import AIResponse, EvidenceItem, ExecutiveBriefResponse
@@ -13,13 +18,14 @@ from app.schemas.ai import AIResponse, EvidenceItem, ExecutiveBriefResponse
 logger = logging.getLogger(__name__)
 
 # Configure Gemini on module load if key is set — key is read from settings only, never logged.
-if settings.gemini_api_key:
+if GENAI_AVAILABLE and settings.gemini_api_key:
     try:
         genai.configure(api_key=settings.gemini_api_key)
     except Exception as e:
         logger.warning("Could not initialize genai with provided key: %s", e)
 
 GEMINI_MODEL = "gemini-1.5-flash"
+
 
 SYSTEM_PROMPT = """
 You are FinGuard AI's Executive Financial Analyst — an analytical assistant that helps executives understand their financial data.
@@ -59,7 +65,7 @@ class GeminiClient:
     """Wraps the Gemini generative model with grounded financial prompting."""
 
     def __init__(self) -> None:
-        if settings.gemini_api_key:
+        if GENAI_AVAILABLE and settings.gemini_api_key:
             try:
                 self.model = genai.GenerativeModel(
                     model_name=GEMINI_MODEL,
@@ -70,6 +76,7 @@ class GeminiClient:
                 self.model = None
         else:
             self.model = None
+
 
     # ------------------------------------------------------------------
     # Internal helpers
