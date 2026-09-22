@@ -2,7 +2,7 @@
 ## AI-Powered Financial Performance, Risk & Decision Intelligence Platform
 
 > **IBM SkillsBuild × Bharat Cares × AICTE** — Data Analyst with AI Internship Project  
-> **Evaluation Status**: Submission Ready · 95/95 Tests Passing (`pytest -q`) · Clean Reproducibility
+> **Evaluation Status**: Submission Ready · **95/95 Tests Passing** (verified via `pytest -q` → `95 passed in 7.17s`) · Clean Build (`tsc && vite build` ✓)
 
 **"From Financial Data to Intelligent Decisions."**
 
